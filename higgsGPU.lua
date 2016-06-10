@@ -1,0 +1,242 @@
+SGD=1
+CG=2
+LBFGS=3
+
+function tryRequire(pkg)
+  require(pkg)
+  print(string.format("Successfully loaded '%s'",pkg));
+end
+
+function zerosTwos(thisY)
+  local newY=torch.DoubleTensor(thisY:size())
+  for i=1,thisY:size(1) do
+    if thisY[i]==10 then
+      newY[i]=1
+    else
+      newY[i]=thisY[i]
+    end
+  end
+  return newY
+end
+
+function loadHiggs()
+  local trainFile = hdf5.open('/app/projects/usnadeep/data/HIGGSTrain.h5')
+  local trX = trainFile:read('/features'):all()
+  local trY = trainFile:read('/labels'):all()
+  local testFile = hdf5.open('/app/projects/usnadeep/data/HIGGSTest.h5')
+  local teX = testFile:read('/features'):all()
+  local teY = testFile:read('/labels'):all()
+  for i=1,trY:size(1) do
+    if trY[i]==0 then
+      trY[i]=2
+    end
+  end
+  for i=1,teY:size(1) do
+    if teY[i]==0 then
+      teY[i]=2
+    end
+  end
+  return trX,trY,teX,teY
+end
+
+function loadSV()
+  local myFile = hdf5.open('/app/projects/usnadeep/data/housenumbers/SVHN_train_hog8.h5')
+  local allTrX = myFile:read('/X'):all()
+  local trY2D = myFile:read('/Y'):all()
+  local allTrY = torch.Tensor(trY2D:size()[1])
+  for i=1,trY2D:size()[1] do
+    allTrY[i]=trY2D[i][1]
+  end
+  local myFile2 = hdf5.open('/app/projects/usnadeep/data/housenumbers/SVHN_test_hog8.h5')
+  local allTeX = myFile2:read('/X'):all()
+  local teY2D = myFile2:read('/Y'):all()
+  local allTeY = torch.Tensor(teY2D:size()[1])
+  for i=1,teY2D:size()[1] do
+    allTeY[i]=teY2D[i][1]
+  end
+  trX,trY=zerosTwos(allTrX,allTrY)
+  teX,teY=zerosTwos(allTeX,allTeY)
+  return trX,trY,teX,teY
+end
+
+function loadSV2DigitExtra()
+  local myFile =
+  hdf5.open('/app/projects/usnadeep/data/housenumbers/SVHN_2Digit_extra_hog8.h5')
+  local allTrX = myFile:read('/X'):all()
+  local trY2D = myFile:read('/Y'):all()
+  --local allTrY = torch.Tensor(trY2D:size()[1])
+  --for i=1,trY2D:size()[1] do
+    --allTrY[i]=trY2D[i][1]
+  --end
+  local myFile2 =
+  hdf5.open('/app/projects/usnadeep/data/housenumbers/SVHN_2Digit_test_hog8.h5')
+  local allTeX = myFile2:read('/X'):all()
+  local teY2D = myFile2:read('/Y'):all()
+  local allTeY = torch.Tensor(teY2D:size()[1])
+  for i=1,teY2D:size()[1] do
+    allTeY[i]=teY2D[i][1]
+  end
+  trX=allTrX
+  trY=trY2D
+  teX=allTeX
+  teY=allTeY
+  --trX,trY=zerosTwos(allTrX,allTrY)
+  --teX,teY=zerosTwos(allTeX,allTeY)
+  return trX,trY,teX,teY
+end
+
+function maxIndex(t)
+  index=1
+  max=t[1]
+  for i = 1,t:size()[1] do
+    if t[i]>max then
+      max=t[i]
+      index=i
+    end
+  end
+  return index
+end
+  
+function numRight(thisPred,thisY)
+  right=0
+  for i=1,testX:size()[1] do
+    if maxIndex(thisPred[i])==thisY[i] then
+      right=right+1
+    end
+  end
+  return right
+end
+
+function setConfig()
+  cmd = torch.CmdLine()
+  cmd:option('-optim','sgd')
+  cmd:option('-learningRate',1)
+  cmd:option('-rho',0.01)
+  cmd:option('-sig',0.5)
+  cmd:option('-int',0.1)
+  cmd:option('-layers',1)
+
+  params = cmd:parse(arg)
+  
+  config={}
+  if params.optim=='sgd' then  
+    config['learningRate']=params.learningRate
+    opt=SGD
+  elseif params.optim=='lbfgs' then
+    config['learningRate']=params.learningRate
+    opt=LBFGS
+  elseif params.optim=='cg' then
+    config['rho']=params.rho
+    config['sig']=params.sig
+    config['int']=params.int
+    opt=CG
+  else
+    error('No Optimization Parameter: ' .. params.optim) 
+  end
+  
+  return config, opt, params.layers
+end
+
+function runIt(trX,trY,teX,teY,config,layers,optMethod)
+  local model = nn.Sequential();
+  model:add(nn.Linear(fullX:size()[2],300))
+  model:add(nn.ReLU())
+  --UNTESTED
+  for i=2,layers do
+    model:add(nn.Linear(300,300))
+    model:add(nn.ReLU())
+  end
+  --END UNTESTED
+  model:add(nn.Linear(300,2))
+  local crit = nn.MultiMarginCriterion();
+  w,df_dw = model:getParameters();
+  print('Successfully created model')
+  model:cuda();
+  crit:cuda();
+
+  odd = true
+
+  function f(w) 
+    model:zeroGradParameters();
+    fw=0
+    for i=1,fullX:size(1),65000 do
+      local tx=fullX[{{i,math.min(i+65000-1,fullX:size(1))},{}}]
+      local ty=fullY[{{i,math.min(i+65000-1,fullY:size(1))}}]
+      local pred = model:forward(tx)
+      fw=fw+crit:forward(pred,ty)
+      local grad = crit:backward(pred,ty)
+      model:backward(tx,grad)
+    end
+    
+    df_dw:div(fullX:size(1))
+
+    return fw, df_dw
+  end
+
+  timer = torch.Timer();
+
+  model:reset()
+
+  w,df_dw = model:getParameters();
+
+
+
+  print("Starting gradient descent from 'optim' on GPU...")
+  timer:reset()
+  local acc=0
+  local i=0
+  while acc<.95 and i<100 do
+    i=i+1
+    --UNTESTED
+    if optMethod==SGD then
+      _,fw = optim.sgd(f,w,config);
+    elseif optMethod==CG then
+      _,fw = optim.cg(f,w,config);
+    elseif optMethod==LBFGS then
+      _,fw = optim.lbfgs(f,w,config);
+    else
+      error('Bad Method')
+    end
+    --END UNTESTED
+    right=0
+    pred=model:forward(testX);
+    for i=1,testX:size()[1] do
+      if maxIndex(pred[i])==testY[i] then
+        right=right+1
+      end
+    end
+    print(string.format('error = %f',fw[1]))
+    acc=right/testX:size(1)
+    print(string.format('time, accuracy = %f, %f',timer:time().real,acc))
+  end
+  cutorch.synchronize()
+  totalTime=timer:time().real
+  print(string.format('Success! TotalTime: %f',timer:time().real))
+
+  testX = testX:cuda();
+  pred=model:forward(testX);
+  confusion = optim.ConfusionMatrix({'0','2'})
+  for i=1,testX:size()[1] do
+    confusion:add(maxIndex(pred[i]),testY[i])
+  end
+  print(confusion)
+  return totalTime,i
+end
+
+
+tryRequire('cunn')
+tryRequire('optim')
+tryRequire('hdf5')
+
+config,opt,layers=setConfig()
+
+fullX,fullY,testX,testY=loadHiggs()
+print('Successfully created Tensors')
+
+fullX = fullX:cuda()
+fullY = fullY:cuda()
+testX = testX:cuda()
+testY = testY:cuda()
+print('Successfully wrote Tensors to GPU')
+
+runIt(fullX,fullY,testX,testY,config,layers,opt)
